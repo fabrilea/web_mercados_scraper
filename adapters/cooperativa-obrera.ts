@@ -33,6 +33,17 @@ const CATEGORIAS_DEFAULT = [
 // vacía, así que este número actúa como techo de seguridad, no como objetivo.
 const MAX_PAGINAS_POR_CATEGORIA = Number(process.env.LACOOPE_MAX_PAGINAS || 300)
 
+// ⚠️ PENDIENTE: cada categoría trae bastante menos de lo esperado (ej. Almacén corta en 248
+// artículos, muy por debajo de los ~1900 reales) y no es por errores de red — no hay ningún
+// throw ni "error en categoría X" en el log, la tanda simplemente empieza a volver vacía en un
+// punto fijo y reproducible aunque se reintente en el mismo lugar de la secuencia normal de
+// paginación. Curiosamente, pegándole a la API a mano con un `pagina` arbitrario (no el que
+// seguiría en la secuencia) y el mismo `cant_articulos` donde cortó, sí devuelve más datos —
+// sugiere que `pagina` no es tan decorativo como se pensaba y el corte depende de algo del
+// lado del server relacionado a esa secuencia incremental, no de cuántos artículos ya se
+// trajeron. Hace falta investigar la API a mano (con curl/Postman, variando `pagina` de forma
+// no incremental) para entender qué la hace cortar — no alcanza con reintentar.
+
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms))
 }
@@ -94,8 +105,26 @@ const CooperativaObreraAdapter: SupermercadoAdapter = {
       let cantidadTraida = 0
       for (let pagina = 0; pagina < MAX_PAGINAS_POR_CATEGORIA; pagina++) {
         try {
-          const datos = await obtenerPagina(cat.id, pagina, cantidadTraida)
-          const articulos = Array.isArray(datos?.articulos) ? datos.articulos : []
+          // Ni un error de red puntual ni una tanda vacía deberían dar por terminada toda la
+          // categoría de una: verificado a mano que la API a veces devuelve 0 artículos de
+          // forma transitoria (no un error) para un offset que, reintentado, sí trae más datos
+          // — antes eso se tomaba como "se acabó el catálogo" (`if (!articulos.length) break`)
+          // y dejaba categorías con una fracción mínima de su catálogo real (ej. Almacén con
+          // ~250 de ~1900 artículos esperados). Ahora sólo se da por terminada la categoría si
+          // la tanda sigue vacía después de reintentar.
+          let articulos: any[] = []
+          let intentos = 0
+          for (;;) {
+            try {
+              const datos = await obtenerPagina(cat.id, pagina, cantidadTraida)
+              articulos = Array.isArray(datos?.articulos) ? datos.articulos : []
+              if (articulos.length || intentos >= 3) break
+            } catch (err) {
+              if (intentos >= 2) throw err
+            }
+            intentos++
+            await sleep(500 * intentos)
+          }
           if (!articulos.length) break
           cantidadTraida += articulos.length
 
