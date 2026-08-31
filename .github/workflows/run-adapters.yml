@@ -1,0 +1,29 @@
+name: Actualizar datos (precios y promos bancarias)
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Diario a las 03:00 UTC. Este repo es público a propósito: GitHub Actions es gratis e
+    # ilimitado en repos públicos (a diferencia de los 2000 min/mes de uno privado, que fue lo
+    # que bloqueó la cuenta corriendo esto mismo a diario desde el repo principal). Por eso el
+    # scraping se separó acá — el repo con el panel admin y la lógica de negocio sigue privado.
+    - cron: '0 3 * * *'
+
+jobs:
+  run-adapters:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run adapters (precios)
+        run: npx ts-node scripts/run_adapters.ts
+      - name: Run promos bancarias
+        run: npx ts-node scripts/run_promos_bancarias.ts

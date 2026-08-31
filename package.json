@@ -1,0 +1,22 @@
+{
+  "name": "web_mercados_scraper",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "postinstall": "prisma generate",
+    "scrape:all": "ts-node scripts/run_adapters.ts",
+    "scrape:promos": "ts-node scripts/run_promos_bancarias.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "4.15.0",
+    "cheerio": "^1.2.0",
+    "dotenv": "^17.4.2",
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "prisma": "4.15.0",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.0.0"
+  }
+}

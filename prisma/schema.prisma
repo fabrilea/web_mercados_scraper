@@ -1,0 +1,79 @@
+generator client {
+	provider = "prisma-client-js"
+}
+
+// Postgres externo (ver DEPLOY.md) — se cambió de SQLite porque un archivo local no
+// sobrevive un deploy serverless (Vercel) ni es alcanzable desde GitHub Actions. El histórico
+// de precios de la DB SQLite anterior (prisma/dev.db) se migra una sola vez con
+// scripts/migrate_sqlite_to_postgres.ts.
+datasource db {
+	provider = "postgresql"
+	url      = env("DATABASE_URL")
+}
+
+model Supermercado {
+	id           Int      @id @default(autoincrement())
+	nombre       String   @unique
+	precios      Precio[]
+	promosBanco  PromoBanco[]
+}
+
+model ProductoCanonico {
+	id            Int     @id @default(autoincrement())
+	nombre        String
+	unidadEstandar String?
+	codigoBarras  String? @unique
+	categoria     String?
+	marca         String?
+	imagenUrl     String?
+	precios       Precio[]
+
+	// Agrupación manual de variantes (ej: "Banana" como base, con "Banana Ecuador" y "Banana
+	// Nacional" como variantes) — no se detecta automático, se vincula a mano desde el admin
+	// porque el nombre de frutas/verduras/panadería varía demasiado entre supermercados como
+	// para inferirlo de forma confiable. `varianteEtiqueta` es lo que se muestra en el chip
+	// (ej. "Ecuatoriana", "Nacional", "500g") y sólo tiene sentido cuando productoBaseId no es
+	// null.
+	productoBaseId   Int?
+	productoBase     ProductoCanonico?  @relation("VariantesDeProducto", fields: [productoBaseId], references: [id])
+	variantes        ProductoCanonico[] @relation("VariantesDeProducto")
+	varianteEtiqueta String?
+}
+
+model Precio {
+	id                Int      @id @default(autoincrement())
+	productoCanonico  ProductoCanonico @relation(fields: [productoCanonicoId], references: [id])
+	productoCanonicoId Int
+	supermercado      Supermercado @relation(fields: [supermercadoId], references: [id])
+	supermercadoId    Int
+	precio            Float
+	precioPromo       Float?
+	fechaRelevado     DateTime
+	promoDescripcion  String?
+	promoDesde        DateTime?
+	promoHasta        DateTime?
+	fuente            String?
+}
+
+// Promos de medios de pago (banco/billetera), condicionadas a día de la semana — dominio de
+// datos distinto de Precio (no hay producto involucrado). No se acumula histórico como con
+// Precio: se actualiza por (supermercadoId, externalId) para no duplicar la misma promo
+// vigente en cada corrida del scraper.
+model PromoBanco {
+	id                  Int      @id @default(autoincrement())
+	supermercado        Supermercado @relation(fields: [supermercadoId], references: [id])
+	supermercadoId      Int
+	externalId          String?
+	titulo              String
+	descripcion         String?
+	descuentoPorcentaje Float?
+	dias                String?
+	imageUrl            String?
+	aplicaOnline        Boolean?
+	validoDesde         DateTime?
+	validoHasta         DateTime?
+	fechaRelevado       DateTime
+	fuente              String?
+
+	@@unique([supermercadoId, externalId])
+}
