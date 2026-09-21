@@ -162,7 +162,22 @@ async function main() {
   // dos corridas se pisan, o si se reprocesa un adaptador viejo, no queremos que un precio
   // anterior sobreescriba a uno posterior.
   async function upsertPreciosActuales(lote: any[]) {
-    const valores = lote.map((r: any) => {
+    // Dentro de un mismo lote puede haber dos items que caen en el MISMO producto canónico: el
+    // fuzzy-match de src/lib/normalize.ts fusiona a propósito SKUs distintos de un mismo super
+    // (mismo producto con y sin texto promocional en el nombre, presentaciones que matchean,
+    // etc.). Postgres rechaza un INSERT ... ON CONFLICT que intente tocar la misma fila dos
+    // veces en la misma sentencia ("ON CONFLICT DO UPDATE command cannot affect row a second
+    // time") y se pierde el lote ENTERO — no la fila duplicada, el lote. Sin este dedup la
+    // caché se quedaba con los precios viejos mientras el histórico sí se actualizaba, que es
+    // exactamente el síntoma de "los precios basura siguen apareciendo en la web".
+    const porPar = new Map<string, any>()
+    for (const r of lote) {
+      const clave = `${r.productoCanonicoId}:${r.supermercadoId}`
+      const previo = porPar.get(clave)
+      if (!previo || r.fechaRelevado >= previo.fechaRelevado) porPar.set(clave, r)
+    }
+
+    const valores = [...porPar.values()].map((r: any) => {
       const promoValida = r.precioPromo != null && r.precioPromo > 0 && r.precioPromo < r.precio
       return Prisma.sql`(
         ${r.productoCanonicoId}::int, ${r.supermercadoId}::int,
