@@ -12,10 +12,11 @@ datasource db {
 }
 
 model Supermercado {
-	id           Int      @id @default(autoincrement())
-	nombre       String   @unique
-	precios      Precio[]
-	promosBanco  PromoBanco[]
+	id             Int      @id @default(autoincrement())
+	nombre         String   @unique
+	precios        Precio[]
+	preciosActuales PrecioActual[]
+	promosBanco    PromoBanco[]
 }
 
 model ProductoCanonico {
@@ -27,6 +28,7 @@ model ProductoCanonico {
 	marca         String?
 	imagenUrl     String?
 	precios       Precio[]
+	preciosActuales PrecioActual[]
 
 	// Agrupación manual de variantes (ej: "Banana" como base, con "Banana Ecuador" y "Banana
 	// Nacional" como variantes) — no se detecta automático, se vincula a mano desde el admin
@@ -53,6 +55,43 @@ model Precio {
 	promoDesde        DateTime?
 	promoHasta        DateTime?
 	fuente            String?
+
+	// Precio no tenía ni un índice: toda consulta de "el precio más reciente de este producto"
+	// terminaba en un scan de la tabla entera (ya más de 1M de filas, y crece ~35.000 por día).
+	@@index([productoCanonicoId, supermercadoId, fechaRelevado(sort: Desc)])
+}
+
+// Caché derivada de Precio: una sola fila por (producto, supermercado) con el último precio
+// conocido. NO es una fuente de verdad —se puede tirar y reconstruir entera desde Precio con
+// scripts/rebuild_precio_actual.ts— y no reemplaza al histórico: Precio sigue siendo append-only.
+//
+// Existe por dos razones que el histórico no puede cubrir:
+//  1. Ordenar el listado por precio. El precio no es una columna de ProductoCanonico, así que no
+//     hay forma de expresarlo en un orderBy sobre el histórico; acá sí, y con índice.
+//  2. Filtrar lo descatalogado. Con ~73.000 filas (contra 1M del histórico) se puede preguntar
+//     "qué productos siguen vigentes" en cada request sin pagar un scan del histórico completo.
+model PrecioActual {
+	id                 Int      @id @default(autoincrement())
+	productoCanonico   ProductoCanonico @relation(fields: [productoCanonicoId], references: [id])
+	productoCanonicoId Int
+	supermercado       Supermercado @relation(fields: [supermercadoId], references: [id])
+	supermercadoId     Int
+	precio             Float
+	precioPromo        Float?
+	// COALESCE(precioPromo, precio) materializado: es por lo que se ordena y por lo que se elige
+	// el "mejor precio". Calcularlo dentro del ORDER BY impediría usar un índice.
+	precioFinal        Float
+	promoDescripcion   String?
+	promoDesde         DateTime?
+	promoHasta         DateTime?
+	// La del Precio correspondiente, no la de la corrida: es lo que permite decidir si este
+	// precio sigue vigente (ver src/lib/frescura.ts).
+	fechaRelevado      DateTime
+	fuente             String?
+
+	@@unique([productoCanonicoId, supermercadoId])
+	@@index([supermercadoId, fechaRelevado])
+	@@index([precioFinal])
 }
 
 // Promos de medios de pago (banco/billetera), condicionadas a día de la semana — dominio de

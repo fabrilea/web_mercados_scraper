@@ -102,6 +102,18 @@ const CarrefourAdapter: SupermercadoAdapter = {
               const seller = item.sellers?.[0]
               const offer = seller?.commertialOffer
               if (!offer || !offer.Price) continue
+              // La API pública de búsqueda de VTEX devuelve el catálogo entero, incluidos
+              // SKUs discontinuados o sin stock que el sitio sí filtra en su propio front-end
+              // (~16% de lo que trae Carrefour). Esos vienen con precios viejos o directamente
+              // basura —acá eran los ~150 productos clavados en $999.999— y entraban a la DB
+              // como si fueran precios reales. `IsAvailable`/`AvailableQuantity` son los
+              // campos con los que el propio sitio decide si mostrar el producto.
+              // Se mira `AvailableQuantity` como señal principal y `IsAvailable` sólo cuando
+              // viene explícitamente en false: en la API legacy los dos campos coinciden
+              // siempre, pero otros endpoints de VTEX devuelven el stock sin `IsAvailable`, y
+              // exigirlo en true ahí dejaría el catálogo entero afuera.
+              if (offer.IsAvailable === false || !(Number(offer.AvailableQuantity) > 0)) continue
+              if (!(Number(offer.Price) > 0)) continue
 
               const key = item.itemId || item.ean || `${p.productId}-${item.name}`
               if (seen.has(key)) continue

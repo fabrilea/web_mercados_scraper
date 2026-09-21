@@ -42,6 +42,9 @@ async function retryAsync<T>(fn: () => Promise<T>, attempts = 3, delayMs = 1000)
 }
 // Try loading Prisma; if unavailable, fallback to JSON file storage
 let prisma: any = null
+// `Prisma.sql`/`Prisma.join` para armar el upsert masivo de PrecioActual con parámetros, sin
+// concatenar strings. Se carga aparte del cliente porque el modo sin DB (archivo JSON) no lo usa.
+let Prisma: any = null
 // Usar Prisma en cuanto haya alguna DATABASE_URL configurada (antes sólo se activaba para
 // rutas file:/dev_new.db de la vieja DB SQLite local — con Postgres externo esa condición
 // nunca daba true, así que esto quedaba escribiendo silenciosamente en data/prices.json en
@@ -52,6 +55,8 @@ if (dbUrl) {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const prismaMod = require('../src/lib/prisma')
     prisma = prismaMod.default || prismaMod
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    Prisma = require('@prisma/client').Prisma
     // connect eagerly
     if (prisma && typeof prisma.$connect === 'function') {
       // it's safe to call connect; ignore promise for scripts that exit quickly
@@ -146,6 +151,46 @@ async function main() {
   // insert de precio en sí, que no necesita ninguna lógica de match, sí.
   const BATCH_SIZE = 200
   let bufferPrecios: any[] = []
+  let descartadosSinPrecio = 0
+  let cacheDesincronizada = false
+
+  // Además del insert en el histórico, se actualiza la caché PrecioActual (una fila por
+  // producto+supermercado con el último precio conocido). Prisma no tiene upsert masivo, así que
+  // va como un solo INSERT ... ON CONFLICT por lote en vez de 200 idas y vueltas.
+  //
+  // El DO UPDATE está condicionado a que la fila guardada NO sea más nueva que la que entra: si
+  // dos corridas se pisan, o si se reprocesa un adaptador viejo, no queremos que un precio
+  // anterior sobreescriba a uno posterior.
+  async function upsertPreciosActuales(lote: any[]) {
+    const valores = lote.map((r: any) => {
+      const promoValida = r.precioPromo != null && r.precioPromo > 0 && r.precioPromo < r.precio
+      return Prisma.sql`(
+        ${r.productoCanonicoId}::int, ${r.supermercadoId}::int,
+        ${r.precio}::double precision, ${r.precioPromo}::double precision,
+        ${promoValida ? r.precioPromo : r.precio}::double precision,
+        ${r.promoDescripcion}::text, ${r.promoDesde}::timestamp, ${r.promoHasta}::timestamp,
+        ${r.fechaRelevado}::timestamp, ${r.fuente}::text
+      )`
+    })
+
+    await prisma.$executeRaw(Prisma.sql`
+      INSERT INTO "PrecioActual" (
+        "productoCanonicoId", "supermercadoId", "precio", "precioPromo", "precioFinal",
+        "promoDescripcion", "promoDesde", "promoHasta", "fechaRelevado", "fuente"
+      )
+      VALUES ${Prisma.join(valores)}
+      ON CONFLICT ("productoCanonicoId", "supermercadoId") DO UPDATE SET
+        "precio"           = EXCLUDED."precio",
+        "precioPromo"      = EXCLUDED."precioPromo",
+        "precioFinal"      = EXCLUDED."precioFinal",
+        "promoDescripcion" = EXCLUDED."promoDescripcion",
+        "promoDesde"       = EXCLUDED."promoDesde",
+        "promoHasta"       = EXCLUDED."promoHasta",
+        "fechaRelevado"    = EXCLUDED."fechaRelevado",
+        "fuente"           = EXCLUDED."fuente"
+      WHERE "PrecioActual"."fechaRelevado" <= EXCLUDED."fechaRelevado"
+    `)
+  }
 
   async function flushBufferPrecios() {
     if (!bufferPrecios.length) return
@@ -158,11 +203,33 @@ async function main() {
       inserted += lote.length
     } catch (e) {
       log(`Failed to persist a batch of ${lote.length} precio rows`, String(e))
+      // Si el histórico no se pudo guardar, no se toca la caché: quedaría diciendo que hay un
+      // precio que en realidad no se registró. `npm run db:rebuild-actuales` la reconstruye.
+      return
+    }
+
+    // Un fallo acá no invalida la corrida: el histórico —que es la fuente de verdad— ya quedó
+    // guardado, y la caché se puede reconstruir entera después.
+    try {
+      await retryAsync(() => upsertPreciosActuales(lote), 2, 500)
+    } catch (e) {
+      log(`Failed to refresh PrecioActual for a batch of ${lote.length} rows`, String(e))
+      cacheDesincronizada = true
     }
   }
 
   for (const it of items) {
     try {
+      // Un precio que no es un número positivo no es un precio: antes `Number(it.precio) || 0`
+      // lo guardaba como $0, que después aparece en la web como "el más barato" de todos y le
+      // gana a cualquier precio real en el optimizador del carrito. Se descarta el item entero
+      // (el producto igual se sigue conociendo por sus corridas anteriores).
+      const precioNumerico = Number(it.precio)
+      if (!Number.isFinite(precioNumerico) || precioNumerico <= 0) {
+        descartadosSinPrecio++
+        continue
+      }
+
       // Cada item puede pertenecer a un supermercado/sucursal distinto (ej. SEPA trae
       // varias sucursales en una sola corrida); si no especifica, se usa el del adaptador.
       const supermercadoNombre = it.supermercadoId || supermercadoDefault
@@ -173,7 +240,7 @@ async function main() {
         bufferPrecios.push({
           productoCanonicoId: prod.id,
           supermercadoId: supermercado.id,
-          precio: Number(it.precio) || 0,
+          precio: precioNumerico,
           precioPromo: it.precioPromo ?? null,
           fechaRelevado: it.fechaRelevado ? new Date(it.fechaRelevado) : new Date(),
           promoDescripcion: it.promoDescripcion ?? null,
@@ -186,7 +253,7 @@ async function main() {
         const row = {
           productoCanonicoId: it.nombreNormalizado,
           supermercado: supermercado.nombre,
-          precio: Number(it.precio) || 0,
+          precio: precioNumerico,
           precioPromo: it.precioPromo ?? null,
           fechaRelevado: it.fechaRelevado ? new Date(it.fechaRelevado).toISOString() : new Date().toISOString(),
           promoDescripcion: it.promoDescripcion ?? null,
@@ -205,6 +272,13 @@ async function main() {
   }
 
   if (prisma) await flushBufferPrecios()
+
+  if (descartadosSinPrecio) {
+    log(`Descartados ${descartadosSinPrecio} items sin un precio positivo válido`)
+  }
+  if (cacheDesincronizada) {
+    log('AVISO: PrecioActual quedó desincronizada en algún lote — correr `npm run db:rebuild-actuales`')
+  }
 
   if (!prisma) {
     fs.writeFileSync(outFile, JSON.stringify(fileData, null, 2), 'utf8')

@@ -87,6 +87,12 @@ const DiaAdapter: SupermercadoAdapter = {
               const seller = item.sellers?.[0]
               const offer = seller?.commertialOffer
               if (!offer || !offer.Price) continue
+              // Mismo filtro de disponibilidad que Carrefour/Vea: la API pública de búsqueda de
+              // VTEX devuelve también los SKUs sin stock o discontinuados, que el sitio sí
+              // esconde en su front-end y que traen precios viejos o inventados. En DIA son
+              // pocos (~1% de lo relevado), pero el criterio es el mismo para los tres.
+              if (offer.IsAvailable === false || !(Number(offer.AvailableQuantity) > 0)) continue
+              if (!(Number(offer.Price) > 0)) continue
 
               const key = item.itemId || item.ean || `${p.productId}-${item.name}`
               if (seen.has(key)) continue
