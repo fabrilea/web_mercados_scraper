@@ -1,8 +1,11 @@
 name: Actualizar datos (precios y promos bancarias)
 
 on:
+  # Sólo manual mientras dura el congelamiento (ver abajo). El bloque `schedule` entero queda
+  # comentado, no sólo la línea del cron: un `schedule:` sin ningún item es YAML inválido para
+  # GitHub Actions y el workflow no cargaría.
   workflow_dispatch:
-  schedule:
+  # schedule:
     # Cada 3 días a las 03:00 UTC. Este repo es público a propósito: GitHub Actions es gratis e
     # ilimitado en repos públicos (a diferencia de los 2000 min/mes de uno privado, que fue lo
     # que bloqueó la cuenta corriendo esto mismo a diario desde el repo principal). Por eso el
@@ -23,7 +26,23 @@ on:
     #
     # `*/3` corre los días 1, 4, 7... del mes; al cambiar de mes el salto puede ser de un día
     # en vez de tres, lo cual no molesta para esto.
-    - cron: '0 3 */3 * *'
+    #
+    # ⏸️ CONGELADO hasta el 2026-10-01. El cupo mensual de Neon ya está agotado, así que cada
+    # corrida que se dispare ahora consume el margen que le queda a la web para seguir en pie —
+    # y el scraping es el que se come el presupuesto, no las visitas. Los precios quedan
+    # congelados mientras tanto, que es aceptable: el corte de frescura es relativo a la última
+    # corrida de cada super, así que si nadie corre no desaparece nada del catálogo, sólo
+    # envejece (ver src/lib/frescura.ts en el repo principal).
+    #
+    # PARA REACTIVAR el 1° de octubre: descomentar `schedule:` arriba Y la línea del cron de
+    # abajo — las dos, o el workflow no carga. Esa primera corrida es
+    # además la que valida el arreglo del índice por código de barras en normalize.ts (bajó
+    # ~45.000 consultas por corrida a una sola) — conviene mirar cuánto tarda comparado con la
+    # hora y media de antes, con el presupuesto del mes entero por delante para corregir si
+    # algo salió mal.
+    #
+    # Mientras tanto queda `workflow_dispatch`, así se puede disparar a mano si hace falta.
+    # - cron: '0 3 */3 * *'
 
 jobs:
   run-adapters:

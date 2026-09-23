@@ -132,29 +132,85 @@ interface CandidatoCache {
   tokens: Set<string>
 }
 
+// Lo mínimo que hace falta para resolver un match por código de barras sin volver a la DB:
+// el id, y los campos que el backfill mira para decidir si hay que completar algo.
+interface ProductoPorEan {
+  id: number
+  nombre: string
+  categoria: string | null
+  marca: string | null
+  imagenUrl: string | null
+}
+
 let cacheCandidatos: CandidatoCache[] | null = null
 let cacheFreq: Map<string, number> | null = null
+// Índice por código de barras, armado de la misma consulta que arma cacheCandidatos.
+//
+// Antes cada item con EAN hacía su propio `findUnique` — y los adaptadores VTEX traen EAN en
+// casi todo, así que eran ~45.000 consultas por corrida, repetidas enteras en cada corrida.
+// Eso es lo que agotó las 100 CU-hours mensuales del plan free de Neon el 2026-09-23 (cobra
+// por tiempo de compute encendido, y esas consultas mantenían la DB despierta hora y media).
+// Indexar acá lo baja a una sola consulta por proceso, que además ya se estaba haciendo.
+let cacheEan: Map<string, ProductoPorEan> | null = null
 
 async function obtenerCandidatos(): Promise<{ candidatos: CandidatoCache[]; freq: Map<string, number> }> {
   if (!cacheCandidatos || !cacheFreq) {
-    const rows = await prisma.productoCanonico.findMany({ select: { id: true, nombre: true } })
-    cacheCandidatos = rows.map((r) => {
-      const norm = normalizeText(stripDiscountPrefix(r.nombre))
-      return { id: r.id, norm, tokens: significantTokens(norm) }
-    })
-    // La frecuencia de palabras se calcula una sola vez con el catálogo tal cual estaba al
-    // arrancar la corrida — productos creados durante la misma corrida no la actualizan. Es
-    // una aproximación aceptable (es sólo un peso heurístico) a cambio de no recalcularla
-    // sobre miles de productos en cada creación.
-    cacheFreq = buildDocFrequency(cacheCandidatos.map((c) => c.tokens))
+    await cargarCache()
   }
-  return { candidatos: cacheCandidatos, freq: cacheFreq }
+  return { candidatos: cacheCandidatos!, freq: cacheFreq! }
 }
 
-function agregarACache(id: number, nombre: string) {
+async function cargarCache() {
+  const rows = await prisma.productoCanonico.findMany({
+    select: { id: true, nombre: true, codigoBarras: true, categoria: true, marca: true, imagenUrl: true }
+  })
+
+  cacheCandidatos = rows.map((r) => {
+    const norm = normalizeText(stripDiscountPrefix(r.nombre))
+    return { id: r.id, norm, tokens: significantTokens(norm) }
+  })
+
+  cacheEan = new Map()
+  for (const r of rows) {
+    if (r.codigoBarras) {
+      cacheEan.set(r.codigoBarras, {
+        id: r.id,
+        nombre: r.nombre,
+        categoria: r.categoria,
+        marca: r.marca,
+        imagenUrl: r.imagenUrl
+      })
+    }
+  }
+
+  // La frecuencia de palabras se calcula una sola vez con el catálogo tal cual estaba al
+  // arrancar la corrida — productos creados durante la misma corrida no la actualizan. Es
+  // una aproximación aceptable (es sólo un peso heurístico) a cambio de no recalcularla
+  // sobre miles de productos en cada creación.
+  cacheFreq = buildDocFrequency(cacheCandidatos.map((c) => c.tokens))
+}
+
+async function obtenerPorEan(codigoBarras: string): Promise<ProductoPorEan | undefined> {
+  if (!cacheEan) await cargarCache()
+  return cacheEan!.get(codigoBarras)
+}
+
+function agregarACache(id: number, nombre: string, codigoBarras?: string, extra?: Partial<ProductoPorEan>) {
   if (!cacheCandidatos) return
   const norm = normalizeText(stripDiscountPrefix(nombre))
   cacheCandidatos.push({ id, norm, tokens: significantTokens(norm) })
+  // Un producto creado durante la corrida tiene que quedar visible para los items siguientes,
+  // o dos items con el mismo EAN en la misma corrida crearían dos canónicos (el segundo
+  // reventaría contra el índice único de codigoBarras).
+  if (codigoBarras && cacheEan) {
+    cacheEan.set(codigoBarras, {
+      id,
+      nombre,
+      categoria: extra?.categoria ?? null,
+      marca: extra?.marca ?? null,
+      imagenUrl: extra?.imagenUrl ?? null
+    })
+  }
 }
 
 /**
@@ -178,15 +234,22 @@ export async function findOrCreateProductoCanonicoByName(
   imagenUrl?: string
 ) {
   if (codigoBarras) {
-    const found = await prisma.productoCanonico.findUnique({ where: { codigoBarras } })
+    const found = await obtenerPorEan(codigoBarras)
     if (found) {
       const faltantes: Record<string, string> = {}
       if (categoria && !found.categoria) faltantes.categoria = categoria
       if (marca && !found.marca) faltantes.marca = marca
       if (imagenUrl && !found.imagenUrl) faltantes.imagenUrl = imagenUrl
       if (Object.keys(faltantes).length) {
-        return prisma.productoCanonico.update({ where: { id: found.id }, data: faltantes })
+        const actualizado = await prisma.productoCanonico.update({ where: { id: found.id }, data: faltantes })
+        // La caché tiene que reflejar el backfill: si no, cada item siguiente con este mismo
+        // EAN vuelve a verlo incompleto y dispara un UPDATE idéntico una y otra vez.
+        Object.assign(found, faltantes)
+        return actualizado
       }
+      // Se devuelve la fila de la caché, no un objeto de Prisma. Los llamadores sólo usan `id`
+      // (ver save_adapter_results.ts), así que alcanza — y evita una consulta por item, que es
+      // justamente el punto de todo esto.
       return found
     }
     // El código de barras es un identificador real y global del producto (asignado por
@@ -205,7 +268,11 @@ export async function findOrCreateProductoCanonicoByName(
         imagenUrl: imagenUrl ?? undefined
       }
     })
-    agregarACache(creado.id, creado.nombre)
+    agregarACache(creado.id, creado.nombre, codigoBarras, {
+      categoria: creado.categoria,
+      marca: creado.marca,
+      imagenUrl: creado.imagenUrl
+    })
     return creado
   }
 
