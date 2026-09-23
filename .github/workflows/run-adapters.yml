@@ -3,11 +3,27 @@ name: Actualizar datos (precios y promos bancarias)
 on:
   workflow_dispatch:
   schedule:
-    # Diario a las 03:00 UTC. Este repo es público a propósito: GitHub Actions es gratis e
+    # Cada 3 días a las 03:00 UTC. Este repo es público a propósito: GitHub Actions es gratis e
     # ilimitado en repos públicos (a diferencia de los 2000 min/mes de uno privado, que fue lo
     # que bloqueó la cuenta corriendo esto mismo a diario desde el repo principal). Por eso el
     # scraping se separó acá — el repo con el panel admin y la lógica de negocio sigue privado.
-    - cron: '0 3 * * *'
+    #
+    # Pero Actions no es el recurso escaso: lo es el COMPUTE DE LA DB. El 2026-09-23 esto agotó
+    # el 100% de las 100 CU-hours mensuales del plan free de Neon, que cobra por tiempo de
+    # compute encendido. La corrida tarda hora y media con la DB despierta todo ese tiempo —
+    # a ~3,3 CU-hours por día de presupuesto, una sola corrida diaria se lo come entero sin que
+    # la web reciba una visita. Bajar a cada 3 días es contención mientras se arregla la causa:
+    # `findOrCreateProductoCanonico` en save_adapter_results.ts hace UNA CONSULTA POR ITEM, y son
+    # ~45.000 items por corrida. Agrupar ese matching es lo que permitiría volver a diario.
+    #
+    # ⚠️ Si cambiás esta frecuencia, hay que acompañarla en el OTRO repo: `UMBRAL_DIAS_DEFAULT`
+    # en src/lib/frescura.ts tiene que quedar en ~1,5x el intervalo (hoy 4 días). Si queda muy
+    # bajo, una corrida que falle a medias esconde catálogo bueno; si queda muy alto, los
+    # productos descatalogados siguen a la vista durante días.
+    #
+    # `*/3` corre los días 1, 4, 7... del mes; al cambiar de mes el salto puede ser de un día
+    # en vez de tres, lo cual no molesta para esto.
+    - cron: '0 3 */3 * *'
 
 jobs:
   run-adapters:
