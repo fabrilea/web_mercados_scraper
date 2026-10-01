@@ -251,15 +251,32 @@ async function main() {
       if (!previo || r.fechaRelevado >= previo.fechaRelevado) porPar.set(clave, r)
     }
 
-    const valores = [...porPar.values()].map((r: any) => {
+    // Las filas van como UN solo parámetro JSON y Postgres las desarma con jsonb_to_recordset,
+    // en vez de un VALUES con un parámetro por columna.
+    //
+    // La versión anterior armaba `VALUES (${...}::int, ${...}::double precision, ...)`: 11
+    // parámetros por fila por 200 filas = 2200 parámetros por sentencia. Prisma infiere el tipo
+    // de cada uno a partir del valor JS, y cuando una columna venía null en algunas filas y con
+    // número en otras —`precioPromo`, típicamente— mandaba tipos distintos para la misma posición
+    // y Postgres rechazaba el lote entero con `22P03: incorrect binary data format in bind
+    // parameter N`. Pasaba en varios lotes de cada corrida y dejaba la caché desincronizada.
+    //
+    // Con un único parámetro no hay nada que inferir: los tipos los declara el `AS t(...)`.
+    const filas = [...porPar.values()].map((r: any) => {
       const promoValida = r.precioPromo != null && r.precioPromo > 0 && r.precioPromo < r.precio
-      return Prisma.sql`(
-        ${r.productoCanonicoId}::int, ${r.supermercadoId}::int,
-        ${r.precio}::double precision, ${r.precioPromo}::double precision,
-        ${promoValida ? r.precioPromo : r.precio}::double precision,
-        ${r.promoDescripcion}::text, ${r.promoDesde}::timestamp, ${r.promoHasta}::timestamp,
-        ${r.fechaRelevado}::timestamp, ${r.fechaRelevado}::timestamp, ${r.fuente}::text
-      )`
+      const iso = (d: any) => (d ? new Date(d).toISOString() : null)
+      return {
+        productoCanonicoId: r.productoCanonicoId,
+        supermercadoId: r.supermercadoId,
+        precio: r.precio,
+        precioPromo: r.precioPromo ?? null,
+        precioFinal: promoValida ? r.precioPromo : r.precio,
+        promoDescripcion: r.promoDescripcion ?? null,
+        promoDesde: iso(r.promoDesde),
+        promoHasta: iso(r.promoHasta),
+        fechaRelevado: iso(r.fechaRelevado),
+        fuente: r.fuente ?? null
+      }
     })
 
     // `vistoEn` se escribe con la misma fecha que `fechaRelevado`: si el precio cambió, esta
@@ -269,7 +286,21 @@ async function main() {
         "productoCanonicoId", "supermercadoId", "precio", "precioPromo", "precioFinal",
         "promoDescripcion", "promoDesde", "promoHasta", "fechaRelevado", "vistoEn", "fuente"
       )
-      VALUES ${Prisma.join(valores)}
+      SELECT t."productoCanonicoId", t."supermercadoId", t."precio", t."precioPromo",
+             t."precioFinal", t."promoDescripcion", t."promoDesde", t."promoHasta",
+             t."fechaRelevado", t."fechaRelevado", t."fuente"
+      FROM jsonb_to_recordset(${JSON.stringify(filas)}::jsonb) AS t(
+        "productoCanonicoId" int,
+        "supermercadoId" int,
+        "precio" double precision,
+        "precioPromo" double precision,
+        "precioFinal" double precision,
+        "promoDescripcion" text,
+        "promoDesde" timestamp,
+        "promoHasta" timestamp,
+        "fechaRelevado" timestamp,
+        "fuente" text
+      )
       ON CONFLICT ("productoCanonicoId", "supermercadoId") DO UPDATE SET
         "precio"           = EXCLUDED."precio",
         "precioPromo"      = EXCLUDED."precioPromo",
