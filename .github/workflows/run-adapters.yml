@@ -1,11 +1,8 @@
 name: Actualizar datos (precios y promos bancarias)
 
 on:
-  # Sólo manual mientras dura el congelamiento (ver abajo). El bloque `schedule` entero queda
-  # comentado, no sólo la línea del cron: un `schedule:` sin ningún item es YAML inválido para
-  # GitHub Actions y el workflow no cargaría.
   workflow_dispatch:
-  # schedule:
+  schedule:
     # Cada 3 días a las 03:00 UTC. Este repo es público a propósito: GitHub Actions es gratis e
     # ilimitado en repos públicos (a diferencia de los 2000 min/mes de uno privado, que fue lo
     # que bloqueó la cuenta corriendo esto mismo a diario desde el repo principal). Por eso el
@@ -13,36 +10,31 @@ on:
     #
     # Pero Actions no es el recurso escaso: lo es el COMPUTE DE LA DB. El 2026-09-23 esto agotó
     # el 100% de las 100 CU-hours mensuales del plan free de Neon, que cobra por tiempo de
-    # compute encendido. La corrida tarda hora y media con la DB despierta todo ese tiempo —
-    # a ~3,3 CU-hours por día de presupuesto, una sola corrida diaria se lo come entero sin que
-    # la web reciba una visita. Bajar a cada 3 días es contención mientras se arregla la causa:
-    # `findOrCreateProductoCanonico` en save_adapter_results.ts hace UNA CONSULTA POR ITEM, y son
-    # ~45.000 items por corrida. Agrupar ese matching es lo que permitiría volver a diario.
+    # compute encendido, y el 25 la base se cayó del todo. El scraping quedó congelado hasta el
+    # 2026-10-01 (el bloque `schedule` entero comentado — no alcanza con comentar sólo el cron:
+    # un `schedule:` sin items es YAML inválido y el workflow deja de cargar).
+    #
+    # La causa de fondo ya está arreglada en el repo principal, en dos partes:
+    #   1. `normalize.ts` resolvía el producto por código de barras con un `findUnique` POR ITEM
+    #      (~45.000 consultas por corrida). Ahora indexa por EAN la caché que ya cargaba.
+    #   2. `save_adapter_results.ts` insertaba una fila en Precio por producto en cada corrida
+    #      aunque el precio fuera idéntico. Ahora inserta sólo los cambios: medido sobre el
+    #      histórico, el 89% de las filas eran repeticiones.
     #
     # ⚠️ Si cambiás esta frecuencia, hay que acompañarla en el OTRO repo: `UMBRAL_DIAS_DEFAULT`
     # en src/lib/frescura.ts tiene que quedar en ~1,5x el intervalo (hoy 4 días). Si queda muy
     # bajo, una corrida que falle a medias esconde catálogo bueno; si queda muy alto, los
     # productos descatalogados siguen a la vista durante días.
     #
+    # Queda en cada 3 días a propósito, no se volvió a diario todavía: los dos arreglos de arriba
+    # están SIN VERIFICAR contra una corrida real. Si esta primera corrida de octubre tarda
+    # bastante menos que la hora y media de antes y el log muestra que la mayoría de los items
+    # salen como "sin cambios", recién ahí conviene volver a diario — y bajando el umbral de
+    # frescura a 1,5 en el mismo movimiento.
+    #
     # `*/3` corre los días 1, 4, 7... del mes; al cambiar de mes el salto puede ser de un día
     # en vez de tres, lo cual no molesta para esto.
-    #
-    # ⏸️ CONGELADO hasta el 2026-10-01. El cupo mensual de Neon ya está agotado, así que cada
-    # corrida que se dispare ahora consume el margen que le queda a la web para seguir en pie —
-    # y el scraping es el que se come el presupuesto, no las visitas. Los precios quedan
-    # congelados mientras tanto, que es aceptable: el corte de frescura es relativo a la última
-    # corrida de cada super, así que si nadie corre no desaparece nada del catálogo, sólo
-    # envejece (ver src/lib/frescura.ts en el repo principal).
-    #
-    # PARA REACTIVAR el 1° de octubre: descomentar `schedule:` arriba Y la línea del cron de
-    # abajo — las dos, o el workflow no carga. Esa primera corrida es
-    # además la que valida el arreglo del índice por código de barras en normalize.ts (bajó
-    # ~45.000 consultas por corrida a una sola) — conviene mirar cuánto tarda comparado con la
-    # hora y media de antes, con el presupuesto del mes entero por delante para corregir si
-    # algo salió mal.
-    #
-    # Mientras tanto queda `workflow_dispatch`, así se puede disparar a mano si hace falta.
-    # - cron: '0 3 */3 * *'
+    - cron: '0 3 */3 * *'
 
 jobs:
   run-adapters:

@@ -154,6 +154,80 @@ async function main() {
   let descartadosSinPrecio = 0
   let cacheDesincronizada = false
 
+  // Precio vigente por (producto, supermercado), cargado de una sola vez al empezar.
+  //
+  // Es lo que permite insertar en Precio SÓLO cuando el valor cambió. Antes cada corrida
+  // insertaba una fila por producto aunque el precio fuera idéntico al de la corrida anterior:
+  // ~45.000 filas por corrida de las cuales la enorme mayoría no aportaban información, y es lo
+  // que llevó la tabla al millón de filas y agotó el cupo de la DB. Un producto que no cambió de
+  // precio ahora sólo actualiza `vistoEn` en PrecioActual, que es un UPDATE de una columna sobre
+  // una fila que ya existe en vez de un INSERT nuevo.
+  const clavePar = (productoId: number, supermercadoId: number) => `${productoId}:${supermercadoId}`
+  const cachePrecioActual = new Map<string, any>()
+
+  if (prisma) {
+    const filas = await prisma.precioActual.findMany({
+      select: {
+        id: true,
+        productoCanonicoId: true,
+        supermercadoId: true,
+        precio: true,
+        precioPromo: true,
+        promoDescripcion: true,
+        promoDesde: true,
+        promoHasta: true
+      }
+    })
+    for (const f of filas) cachePrecioActual.set(clavePar(f.productoCanonicoId, f.supermercadoId), f)
+    log(`PrecioActual en memoria: ${filas.length} filas`)
+  }
+
+  const mismaFecha = (a: Date | null | undefined, b: Date | null | undefined) => {
+    if (!a && !b) return true
+    if (!a || !b) return false
+    return new Date(a).getTime() === new Date(b).getTime()
+  }
+
+  // Qué cuenta como "el mismo precio": todo lo que se guardaría en la fila de Precio. Si algo de
+  // esto cambió —incluida la descripción o la vigencia de una promo— es un dato nuevo y merece su
+  // propia fila en el histórico.
+  function mismoPrecio(anterior: any, nuevo: any): boolean {
+    if (!anterior) return false
+    return (
+      anterior.precio === nuevo.precio &&
+      (anterior.precioPromo ?? null) === (nuevo.precioPromo ?? null) &&
+      (anterior.promoDescripcion ?? null) === (nuevo.promoDescripcion ?? null) &&
+      mismaFecha(anterior.promoDesde, nuevo.promoDesde) &&
+      mismaFecha(anterior.promoHasta, nuevo.promoHasta)
+    )
+  }
+
+  // Los que no cambiaron: sólo hay que marcarlos como vistos. Se juntan en lotes más grandes que
+  // los inserts porque es un UPDATE de una columna sobre filas que ya existen, mucho más barato.
+  const BATCH_VISTOS = 2000
+  let bufferVistos: number[] = []
+  let sinCambio = 0
+
+  async function flushBufferVistos(cuando: Date) {
+    if (!bufferVistos.length) return
+    const ids = bufferVistos
+    bufferVistos = []
+    try {
+      await retryAsync(
+        () =>
+          prisma.precioActual.updateMany({
+            where: { id: { in: ids } },
+            data: { vistoEn: cuando }
+          }),
+        2,
+        500
+      )
+    } catch (e) {
+      log(`Failed to mark ${ids.length} rows as seen`, String(e))
+      cacheDesincronizada = true
+    }
+  }
+
   // Además del insert en el histórico, se actualiza la caché PrecioActual (una fila por
   // producto+supermercado con el último precio conocido). Prisma no tiene upsert masivo, así que
   // va como un solo INSERT ... ON CONFLICT por lote en vez de 200 idas y vueltas.
@@ -184,14 +258,16 @@ async function main() {
         ${r.precio}::double precision, ${r.precioPromo}::double precision,
         ${promoValida ? r.precioPromo : r.precio}::double precision,
         ${r.promoDescripcion}::text, ${r.promoDesde}::timestamp, ${r.promoHasta}::timestamp,
-        ${r.fechaRelevado}::timestamp, ${r.fuente}::text
+        ${r.fechaRelevado}::timestamp, ${r.fechaRelevado}::timestamp, ${r.fuente}::text
       )`
     })
 
+    // `vistoEn` se escribe con la misma fecha que `fechaRelevado`: si el precio cambió, esta
+    // corrida es a la vez el último cambio y la última vez que se vio el producto.
     await prisma.$executeRaw(Prisma.sql`
       INSERT INTO "PrecioActual" (
         "productoCanonicoId", "supermercadoId", "precio", "precioPromo", "precioFinal",
-        "promoDescripcion", "promoDesde", "promoHasta", "fechaRelevado", "fuente"
+        "promoDescripcion", "promoDesde", "promoHasta", "fechaRelevado", "vistoEn", "fuente"
       )
       VALUES ${Prisma.join(valores)}
       ON CONFLICT ("productoCanonicoId", "supermercadoId") DO UPDATE SET
@@ -202,6 +278,7 @@ async function main() {
         "promoDesde"       = EXCLUDED."promoDesde",
         "promoHasta"       = EXCLUDED."promoHasta",
         "fechaRelevado"    = EXCLUDED."fechaRelevado",
+        "vistoEn"          = EXCLUDED."vistoEn",
         "fuente"           = EXCLUDED."fuente"
       WHERE "PrecioActual"."fechaRelevado" <= EXCLUDED."fechaRelevado"
     `)
@@ -252,7 +329,7 @@ async function main() {
 
       if (prisma) {
         const prod = await findOrCreateProductoCanonico(it)
-        bufferPrecios.push({
+        const fila = {
           productoCanonicoId: prod.id,
           supermercadoId: supermercado.id,
           precio: precioNumerico,
@@ -262,8 +339,26 @@ async function main() {
           promoDesde: it.promoValidoDesde ? new Date(it.promoValidoDesde) : null,
           promoHasta: it.promoValidoHasta ? new Date(it.promoValidoHasta) : null,
           fuente: it.fuente ?? 'scraping_web'
-        })
-        if (bufferPrecios.length >= BATCH_SIZE) await flushBufferPrecios()
+        }
+
+        const clave = clavePar(prod.id, supermercado.id)
+        const anterior = cachePrecioActual.get(clave)
+
+        if (mismoPrecio(anterior, fila)) {
+          // Nada nuevo que contar: el producto sigue ahí al mismo precio. Se marca como visto y
+          // listo — no se escribe una fila de histórico que sería idéntica a la anterior.
+          bufferVistos.push(anterior.id)
+          sinCambio++
+          if (bufferVistos.length >= BATCH_VISTOS) await flushBufferVistos(fila.fechaRelevado)
+        } else {
+          bufferPrecios.push(fila)
+          // La caché se actualiza acá y no al hacer flush, porque dentro de la misma corrida
+          // puede venir otro item que caiga en el mismo producto canónico (el fuzzy-match fusiona
+          // SKUs distintos de un mismo super): si no, el segundo compararía contra el precio
+          // viejo y escribiría una fila de más.
+          cachePrecioActual.set(clave, { ...(anterior || {}), ...fila, id: anterior?.id })
+          if (bufferPrecios.length >= BATCH_SIZE) await flushBufferPrecios()
+        }
       } else {
         const row = {
           productoCanonicoId: it.nombreNormalizado,
@@ -286,10 +381,18 @@ async function main() {
     }
   }
 
-  if (prisma) await flushBufferPrecios()
+  if (prisma) {
+    await flushBufferPrecios()
+    await flushBufferVistos(new Date())
+  }
 
   if (descartadosSinPrecio) {
     log(`Descartados ${descartadosSinPrecio} items sin un precio positivo válido`)
+  }
+  if (prisma) {
+    // El ratio entre estos dos números es la medida de cuánto sirve no insertar repeticiones:
+    // si "sin cambios" es la enorme mayoría, la tabla de histórico deja de crecer en balde.
+    log(`Precios nuevos o modificados: ${inserted} — sin cambios (sólo marcados como vistos): ${sinCambio}`)
   }
   if (cacheDesincronizada) {
     log('AVISO: PrecioActual quedó desincronizada en algún lote — correr `npm run db:rebuild-actuales`')

@@ -84,13 +84,23 @@ model PrecioActual {
 	promoDescripcion   String?
 	promoDesde         DateTime?
 	promoHasta         DateTime?
-	// La del Precio correspondiente, no la de la corrida: es lo que permite decidir si este
-	// precio sigue vigente (ver src/lib/frescura.ts).
+	// Cuándo se registró ESTE precio, o sea la fecha de la fila de Precio correspondiente.
+	// Desde que el scraper inserta en Precio sólo cuando el valor cambia, esta fecha es la del
+	// último CAMBIO de precio, no la de la última vez que se vio el producto.
 	fechaRelevado      DateTime
+	// Última vez que el scraper vio este producto en este supermercado, cambie o no el precio.
+	// Se actualiza en TODAS las corridas, y es lo que usa el filtro de frescura: la pregunta que
+	// hay que responder ahí es "¿el super sigue listando esto?", no "¿cuándo cambió el precio?".
+	// Antes las dos preguntas tenían la misma respuesta porque cada corrida insertaba una fila
+	// aunque el precio fuera idéntico; separarlas es lo que permite dejar de hacerlo.
+	vistoEn            DateTime
 	fuente             String?
 
 	@@unique([productoCanonicoId, supermercadoId])
-	@@index([supermercadoId, fechaRelevado])
+	// El índice por (supermercadoId, fechaRelevado) se reemplazó por uno sobre vistoEn: ninguna
+	// consulta filtra ya por fechaRelevado acá, y un índice que nadie usa igual se mantiene en
+	// cada escritura.
+	@@index([supermercadoId, vistoEn])
 	@@index([precioFinal])
 }
 
