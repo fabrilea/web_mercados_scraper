@@ -175,7 +175,9 @@ async function main() {
         precioPromo: true,
         promoDescripcion: true,
         promoDesde: true,
-        promoHasta: true
+        promoHasta: true,
+        urlProducto: true,
+        skuExterno: true
       }
     })
     for (const f of filas) cachePrecioActual.set(clavePar(f.productoCanonicoId, f.supermercadoId), f)
@@ -207,6 +209,39 @@ async function main() {
   const BATCH_VISTOS = 2000
   let bufferVistos: number[] = []
   let sinCambio = 0
+
+  // Link al producto y su id en el sitio del super (ver PrecioActual.urlProducto/skuExterno). No
+  // son parte del precio —no generan fila de histórico— pero hay que guardarlos aunque el precio no
+  // haya cambiado: si no, las filas que ya existían antes de agregar estas columnas no se
+  // completarían nunca. Sólo se escriben las que cambiaron, así que después de la primera corrida
+  // esto queda prácticamente vacío.
+  let bufferMeta: { id: number; urlProducto: string | null; skuExterno: string | null }[] = []
+
+  async function flushBufferMeta() {
+    if (!bufferMeta.length) return
+    const lote = bufferMeta
+    bufferMeta = []
+    try {
+      await retryAsync(
+        () =>
+          prisma.$executeRaw(Prisma.sql`
+            UPDATE "PrecioActual" AS pa SET
+              "urlProducto" = COALESCE(t."urlProducto", pa."urlProducto"),
+              "skuExterno"  = COALESCE(t."skuExterno", pa."skuExterno")
+            FROM jsonb_to_recordset(${JSON.stringify(lote)}::jsonb) AS t(
+              "id" int, "urlProducto" text, "skuExterno" text
+            )
+            WHERE pa."id" = t."id"
+          `),
+        2,
+        500
+      )
+    } catch (e) {
+      // No es crítico: sin esto sólo falta el link/verificación de esos productos hasta la
+      // próxima corrida. No marca la caché como desincronizada (los precios están bien).
+      log(`Failed to update link/sku of ${lote.length} rows`, String(e))
+    }
+  }
 
   async function flushBufferVistos(cuando: Date) {
     if (!bufferVistos.length) return
@@ -275,7 +310,9 @@ async function main() {
         promoDesde: iso(r.promoDesde),
         promoHasta: iso(r.promoHasta),
         fechaRelevado: iso(r.fechaRelevado),
-        fuente: r.fuente ?? null
+        fuente: r.fuente ?? null,
+        urlProducto: r.urlProducto ?? null,
+        skuExterno: r.skuExterno ?? null
       }
     })
 
@@ -284,11 +321,12 @@ async function main() {
     await prisma.$executeRaw(Prisma.sql`
       INSERT INTO "PrecioActual" (
         "productoCanonicoId", "supermercadoId", "precio", "precioPromo", "precioFinal",
-        "promoDescripcion", "promoDesde", "promoHasta", "fechaRelevado", "vistoEn", "fuente"
+        "promoDescripcion", "promoDesde", "promoHasta", "fechaRelevado", "vistoEn", "fuente",
+        "urlProducto", "skuExterno"
       )
       SELECT t."productoCanonicoId", t."supermercadoId", t."precio", t."precioPromo",
              t."precioFinal", t."promoDescripcion", t."promoDesde", t."promoHasta",
-             t."fechaRelevado", t."fechaRelevado", t."fuente"
+             t."fechaRelevado", t."fechaRelevado", t."fuente", t."urlProducto", t."skuExterno"
       FROM jsonb_to_recordset(${JSON.stringify(filas)}::jsonb) AS t(
         "productoCanonicoId" int,
         "supermercadoId" int,
@@ -299,7 +337,9 @@ async function main() {
         "promoDesde" timestamp,
         "promoHasta" timestamp,
         "fechaRelevado" timestamp,
-        "fuente" text
+        "fuente" text,
+        "urlProducto" text,
+        "skuExterno" text
       )
       ON CONFLICT ("productoCanonicoId", "supermercadoId") DO UPDATE SET
         "precio"           = EXCLUDED."precio",
@@ -310,7 +350,11 @@ async function main() {
         "promoHasta"       = EXCLUDED."promoHasta",
         "fechaRelevado"    = EXCLUDED."fechaRelevado",
         "vistoEn"          = EXCLUDED."vistoEn",
-        "fuente"           = EXCLUDED."fuente"
+        "fuente"           = EXCLUDED."fuente",
+        -- COALESCE: un adaptador que no da link (o una corrida vieja reprocesada) no borra el que
+        -- ya estaba guardado.
+        "urlProducto"      = COALESCE(EXCLUDED."urlProducto", "PrecioActual"."urlProducto"),
+        "skuExterno"       = COALESCE(EXCLUDED."skuExterno", "PrecioActual"."skuExterno")
       WHERE "PrecioActual"."fechaRelevado" <= EXCLUDED."fechaRelevado"
     `)
   }
@@ -321,7 +365,9 @@ async function main() {
     bufferPrecios = []
     try {
       await retryAsync(async () => {
-        await prisma.precio.createMany({ data: lote })
+        // urlProducto/skuExterno viajan en el lote para el upsert de PrecioActual, pero no son
+        // columnas de Precio (no son parte del histórico).
+        await prisma.precio.createMany({ data: lote.map(({ urlProducto, skuExterno, ...fila }: any) => fila) })
       }, 2, 500)
       inserted += lote.length
     } catch (e) {
@@ -372,6 +418,11 @@ async function main() {
           fuente: it.fuente ?? 'scraping_web'
         }
 
+        const meta = {
+          urlProducto: typeof it.urlProducto === 'string' && it.urlProducto ? it.urlProducto : null,
+          skuExterno: it.skuExterno != null && it.skuExterno !== '' ? String(it.skuExterno) : null
+        }
+
         const clave = clavePar(prod.id, supermercado.id)
         const anterior = cachePrecioActual.get(clave)
 
@@ -381,13 +432,24 @@ async function main() {
           bufferVistos.push(anterior.id)
           sinCambio++
           if (bufferVistos.length >= BATCH_VISTOS) await flushBufferVistos(fila.fechaRelevado)
+
+          const cambioMeta =
+            (meta.urlProducto && meta.urlProducto !== anterior.urlProducto) ||
+            (meta.skuExterno && meta.skuExterno !== anterior.skuExterno)
+          // `anterior.id` falta cuando la fila la creó un item anterior de ESTA corrida (todavía no
+          // hay id); ese insert ya llevó su propio link.
+          if (cambioMeta && anterior.id != null) {
+            bufferMeta.push({ id: anterior.id, ...meta })
+            cachePrecioActual.set(clave, { ...anterior, ...meta })
+            if (bufferMeta.length >= BATCH_VISTOS) await flushBufferMeta()
+          }
         } else {
-          bufferPrecios.push(fila)
+          bufferPrecios.push({ ...fila, ...meta })
           // La caché se actualiza acá y no al hacer flush, porque dentro de la misma corrida
           // puede venir otro item que caiga en el mismo producto canónico (el fuzzy-match fusiona
           // SKUs distintos de un mismo super): si no, el segundo compararía contra el precio
           // viejo y escribiría una fila de más.
-          cachePrecioActual.set(clave, { ...(anterior || {}), ...fila, id: anterior?.id })
+          cachePrecioActual.set(clave, { ...(anterior || {}), ...fila, ...meta, id: anterior?.id })
           if (bufferPrecios.length >= BATCH_SIZE) await flushBufferPrecios()
         }
       } else {
@@ -415,6 +477,7 @@ async function main() {
   if (prisma) {
     await flushBufferPrecios()
     await flushBufferVistos(new Date())
+    await flushBufferMeta()
   }
 
   if (descartadosSinPrecio) {

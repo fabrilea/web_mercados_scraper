@@ -16,6 +16,11 @@ export interface ProductoPrecio {
   promoValidoDesde?: Date
   promoValidoHasta?: Date
   fuente?: string
+  // Página del producto en el sitio del super (para que el usuario verifique el precio) y su id
+  // en ese sistema (para la verificación en vivo). Opcionales: sólo se completan cuando la fuente
+  // da una URL/id estable y confirmada — mejor sin link que con uno inventado.
+  urlProducto?: string
+  skuExterno?: string
 }
 
 export interface SupermercadoAdapter {

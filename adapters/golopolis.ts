@@ -1,5 +1,6 @@
 import { ProductoPrecio, SupermercadoAdapter } from './types'
 import { categoriaDesdeSegmentos } from '../src/lib/categoriaHeuristica.ts'
+import { extraerProductosGolopolis } from '../src/lib/supermercados.ts'
 
 // Golopolis (Tandil) — "Golopolis Supermarket", plataforma GoalEyes/Daedaz. A diferencia de
 // los sitios VTEX (Carrefour/DIA/Vea), acá cada página de subcategoría es HTML
@@ -83,14 +84,15 @@ async function descubrirSubcategorias(): Promise<Subcategoria[]> {
   return out
 }
 
+function urlSubcategoria(superItemId: string, itemId: string): string {
+  return `${BASE}?action=products&superItemId=${superItemId}&itemId=${itemId}`
+}
+
 async function fetchSubcategoria(superItemId: string, itemId: string): Promise<any[]> {
-  const url = `${BASE}?action=products&superItemId=${superItemId}&itemId=${itemId}`
+  const url = urlSubcategoria(superItemId, itemId)
   const res = await fetch(url, { headers: HEADERS })
   if (!res.ok) throw new Error(`HTTP ${res.status} en ${url}`)
-  const html = await res.text()
-  const m = html.match(/var\s+aProducts\s*=\s*(\[.*?\]);/s)
-  if (!m) return []
-  return JSON.parse(m[1])
+  return extraerProductosGolopolis(await res.text())
 }
 
 function toFecha(fechaStr: string | null | undefined): Date | undefined {
@@ -151,7 +153,13 @@ const GolopolisAdapter: SupermercadoAdapter = {
             fechaRelevado: new Date(),
             promoDescripcion: precioPromo ? (p.promotion || undefined) : undefined,
             promoValidoHasta: precioPromo ? toFecha(p.until) : undefined,
-            fuente: 'scraping_web'
+            fuente: 'scraping_web',
+            // El sitio no tiene página por producto: el link es la subcategoría donde aparece, que
+            // es una página pública que el usuario puede abrir y donde ve el precio. Esa misma
+            // página es la que consulta la verificación en vivo, buscando el producto por id en su
+            // `aProducts` (una sola request trae la subcategoría entera).
+            urlProducto: urlSubcategoria(sub.superItemId, sub.itemId),
+            skuExterno: id
           })
         }
 

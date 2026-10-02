@@ -1,5 +1,6 @@
 import { ProductoPrecio, SupermercadoAdapter } from './types'
 import { categoriaDesdeSegmentos } from '../src/lib/categoriaHeuristica.ts'
+import { urlProductoVtex } from '../src/lib/supermercados.ts'
 
 // Carrefour es un sitio VTEX. En vez de scrapear HTML, se usa la API pública de
 // búsqueda "legacy" de VTEX (catalog_system/pub/products/search), que expone EAN real,
@@ -140,7 +141,9 @@ const CarrefourAdapter: SupermercadoAdapter = {
                 precioPromo,
                 unidad: item.measurementUnit || 'unidad',
                 fechaRelevado: new Date(),
-                fuente: 'scraping_web'
+                fuente: 'scraping_web',
+                urlProducto: urlProductoVtex(BASE, p),
+                skuExterno: item.itemId ? String(item.itemId) : undefined
               })
               traidos++
             }

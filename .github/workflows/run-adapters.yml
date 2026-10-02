@@ -54,3 +54,21 @@ jobs:
         run: npx ts-node scripts/run_adapters.ts
       - name: Run promos bancarias
         run: npx ts-node scripts/run_promos_bancarias.ts
+      # La web cachea los precios y sólo los vuelve a leer de la DB cuando recibe este aviso (ver
+      # src/lib/preciosCache.ts y DEPLOY.md §5 en el repo principal); sin él se actualiza igual,
+      # pero hasta 6 horas tarde. `if: always()` porque si falla un paso anterior, los adaptadores
+      # que sí corrieron ya guardaron precios nuevos.
+      - name: Avisar a la web que hay precios nuevos
+        if: always()
+        run: |
+          # Se exige un 200 explícito y no `curl --fail`: --fail sólo falla con 4xx/5xx, así que
+          # una redirección (APP_URL sin www, o con / al final) pasaba como éxito sin avisar nada.
+          code=$(curl --silent --show-error --max-redirs 0 --output /dev/stderr --write-out '%{http_code}' \
+            -X POST "${APP_URL%/}/api/revalidar" -H "Authorization: Bearer $REVALIDAR_SECRET")
+          if [ "$code" != "200" ]; then
+            echo "La web respondió HTTP $code al aviso de revalidación (se esperaba 200)"
+            exit 1
+          fi
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          REVALIDAR_SECRET: ${{ secrets.REVALIDAR_SECRET }}

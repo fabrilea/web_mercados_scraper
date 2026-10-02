@@ -1,5 +1,6 @@
 import { ProductoPrecio, SupermercadoAdapter } from './types'
 import { categoriaDesdeSegmentos } from '../src/lib/categoriaHeuristica.ts'
+import { urlProductoVtex } from '../src/lib/supermercados.ts'
 
 // DIA Online también es un sitio VTEX. Igual que Carrefour, se usa la API pública de
 // búsqueda "legacy" de VTEX en vez de scrapear HTML: expone EAN real, precio, precio de
@@ -119,7 +120,9 @@ const DiaAdapter: SupermercadoAdapter = {
                 precioPromo,
                 unidad: item.measurementUnit || 'unidad',
                 fechaRelevado: new Date(),
-                fuente: 'scraping_web'
+                fuente: 'scraping_web',
+                urlProducto: urlProductoVtex(BASE, p),
+                skuExterno: item.itemId ? String(item.itemId) : undefined
               })
               traidos++
             }

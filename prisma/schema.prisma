@@ -95,6 +95,17 @@ model PrecioActual {
 	// aunque el precio fuera idéntico; separarlas es lo que permite dejar de hacerlo.
 	vistoEn            DateTime
 	fuente             String?
+	// Página del producto en el sitio del supermercado, para que el usuario pueda verificar el
+	// precio él mismo. Null cuando el sitio no tiene una URL estable por producto conocida (ver
+	// src/lib/supermercados.ts, que cae a la home del super en ese caso).
+	urlProducto        String?
+	// Id del producto en el sistema del supermercado (skuId de VTEX, id de Monarca/Golopolis). Es
+	// lo que usa la verificación en vivo (src/lib/verificacionEnVivo.ts) para consultar el precio
+	// actual de UN producto sin pasar por la DB.
+	//
+	// Viven acá y no en Precio porque no son parte del histórico: si cambian, se pisan, y un
+	// cambio de link no amerita una fila nueva de precio.
+	skuExterno         String?
 
 	@@unique([productoCanonicoId, supermercadoId])
 	// El índice por (supermercadoId, fechaRelevado) se reemplazó por uno sobre vistoEn: ninguna

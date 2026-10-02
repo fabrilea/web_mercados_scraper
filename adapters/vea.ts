@@ -1,5 +1,6 @@
 import { ProductoPrecio, SupermercadoAdapter } from './types'
 import { categoriaDesdeSegmentos } from '../src/lib/categoriaHeuristica.ts'
+import { urlProductoVtex } from '../src/lib/supermercados.ts'
 
 // Vea (grupo Cencosud) es, igual que Carrefour/DIA, un sitio VTEX: se usa la misma API
 // pública de búsqueda "legacy" de VTEX (catalog_system/pub/products/search) en vez de
@@ -166,7 +167,9 @@ const VeaAdapter: SupermercadoAdapter = {
                 precioPromo,
                 unidad: item.measurementUnit || 'unidad',
                 fechaRelevado: new Date(),
-                fuente: 'scraping_web'
+                fuente: 'scraping_web',
+                urlProducto: urlProductoVtex(BASE, p),
+                skuExterno: item.itemId ? String(item.itemId) : undefined
               })
               traidos++
             }
