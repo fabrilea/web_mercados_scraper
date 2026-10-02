@@ -74,6 +74,30 @@ export function extraerProductosGolopolis(html: string): any[] {
 
 export const MONARCA_API = 'https://web.monarcadigital.com.ar/api'
 
+/** Página del producto: `/products/{id}`, con el mismo id que la API (confirmado con un link real). */
+export function urlProductoMonarca(id: string | number): string {
+  return `https://web.monarcadigital.com.ar/products/${encodeURIComponent(String(id))}`
+}
+
+// --- Cooperativa Obrera (La Coope en Casa) ---
+
+export const COOPE_API = 'https://api.lacoopeencasa.coop/api'
+
+/**
+ * Página del artículo: `/producto/{slug}/{cod_interno}`, ej.
+ * `/producto/aperitivo-americano-gancia-950cm3/110728`. El slug es la descripción en minúsculas,
+ * sin acentos y con guiones; el que identifica al artículo es el código.
+ */
+export function urlProductoCoope(codInterno: string | number, descripcion: string | null | undefined): string {
+  const slug = String(descripcion || 'producto')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return `https://www.lacoopeencasa.coop/producto/${slug || 'producto'}/${encodeURIComponent(String(codInterno))}`
+}
+
 /**
  * Precio unitario de promo de Monarca: `totalPrice` cubre `productQuantity` unidades (promos tipo
  * "4x $1550"), así que se prorratea. Mismo criterio que adapters/monarca.ts.

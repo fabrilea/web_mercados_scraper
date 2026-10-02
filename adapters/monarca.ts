@@ -1,5 +1,5 @@
 import { ProductoPrecio, SupermercadoAdapter } from './types'
-import { precioPromoUnitarioMonarca } from '../src/lib/supermercados.ts'
+import { precioPromoUnitarioMonarca, urlProductoMonarca } from '../src/lib/supermercados.ts'
 
 // Monarca Digital expone una API JSON propia (web.monarcadigital.com.ar/api) que no
 // requiere Playwright: da nombre limpio, marca, presentación, código de barras real (EAN),
@@ -126,10 +126,10 @@ const MonarcaAdapter: SupermercadoAdapter = {
               promoValidoDesde: promo ? parseFechaAr(promo.fromDate) : undefined,
               promoValidoHasta: promo ? parseFechaAr(promo.dateTo) : undefined,
               fuente: 'scraping_web',
-              // Sin urlProducto a propósito: el sitio es una SPA y no hay una ruta por producto
-              // confirmada (probar `/products/{id}` devuelve la home). El link cae a la home del
-              // super (ver src/lib/supermercados.ts). El id sí sirve para la verificación en vivo:
-              // `GET /api/products/{id}` devuelve el producto con su precio actual.
+              // El id de la API es el mismo de la página del producto (`/products/{id}`, confirmado
+              // con un link real del sitio) y el que usa la verificación en vivo
+              // (`GET /api/products/{id}`).
+              urlProducto: p.id != null ? urlProductoMonarca(p.id) : undefined,
               skuExterno: p.id != null ? String(p.id) : undefined
             })
           }

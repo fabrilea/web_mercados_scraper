@@ -1,5 +1,6 @@
 import { ProductoPrecio, SupermercadoAdapter } from './types'
 import { categoriaDesdeSegmentos } from '../src/lib/categoriaHeuristica.ts'
+import { urlProductoCoope } from '../src/lib/supermercados.ts'
 
 // Cooperativa Obrera — e-commerce "La Coope en Casa" (lacoopeencasa.coop).
 // A diferencia de los sitios VTEX (Carrefour, DIA), este sitio expone una API JSON propia
@@ -160,7 +161,11 @@ const CooperativaObreraAdapter: SupermercadoAdapter = {
               promoDescripcion: a.descripcion_promo || undefined,
               promoValidoDesde: toFecha(a.vigencia_promo_desde),
               promoValidoHasta: toFecha(a.vigencia_promo),
-              fuente: 'scraping_web'
+              fuente: 'scraping_web',
+              // `cod_interno` es el código del artículo en la URL de la página del producto y el
+              // que usa la verificación en vivo (`articulo/detalle?cod_interno=`).
+              urlProducto: a.cod_interno ? urlProductoCoope(a.cod_interno, a.descripcion) : undefined,
+              skuExterno: a.cod_interno ? String(a.cod_interno) : undefined
             })
           }
 
