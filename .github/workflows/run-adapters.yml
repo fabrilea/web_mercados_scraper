@@ -47,7 +47,10 @@ jobs:
       - name: Use Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          # Node 18 no tiene `File` global y `undici` (que arrastra cheerio) lo exige al cargarse:
+          # el paso de promos bancarias moría con "ReferenceError: File is not defined". El
+          # paso de precios no lo cargaba, por eso ese sí andaba.
+          node-version: '22'
       - name: Install dependencies
         run: npm ci
       - name: Run adapters (precios)
